@@ -1,5 +1,6 @@
 import io
 import os
+import json
 import requests
 from PIL import Image
 from fastapi import FastAPI, File, UploadFile, Form, Query, Header, HTTPException
@@ -110,7 +111,7 @@ async def process_car_image(
             
             files_dict = {
                 'file': (filename, img_byte_arr.getvalue(), 'image/png'),
-                'payload_json': (None, requests.compat.json.dumps(payload), 'application/json')
+                'payload_json': (None, json.dumps(payload), 'application/json')
             }
             
             resp = requests.post(target_webhook, files=files_dict)
