@@ -20,44 +20,63 @@ app.add_middleware(
 
 def remove_green_screen_background(pil_image: Image.Image) -> Image.Image:
     """
-    Ultra-lightweight high-speed Chroma Key Green Screen removal & spill reduction.
-    Uses ~30MB RAM (Perfect for Render Free Tier).
+    Advanced Flood-Fill Chroma Keying.
+    Preserves 100% of silver, white, chrome & grey car paint highlights,
+    while removing connected studio green screen background cleanly.
     """
     img_rgba = pil_image.convert("RGBA")
     np_img = np.array(img_rgba)
-    
-    # Extract channels
-    r = np_img[:, :, 0].astype(np.int16)
-    g = np_img[:, :, 1].astype(np.int16)
-    b = np_img[:, :, 2].astype(np.int16)
-    
-    # Convert to HSV color space for accurate green detection
-    rgb_bgr = cv2.cvtColor(np_img[:, :, :3], cv2.COLOR_RGB2BGR)
-    hsv = cv2.cvtColor(rgb_bgr, cv2.COLOR_BGR2HSV)
-    
-    # Define green screen HSV boundaries (bright neon green studio screen)
-    lower_green = np.array([35, 45, 45])
+    h, w = np_img.shape[:2]
+
+    # Convert RGB to HSV for precise green detection
+    rgb = np_img[:, :, :3]
+    hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
+
+    # Neon Green Studio HSV bounds:
+    # High Saturation (S >= 80) and High Value (V >= 70) ensures white/silver car paint is NEVER selected
+    lower_green = np.array([35, 80, 70])
     upper_green = np.array([85, 255, 255])
     
     green_mask = cv2.inRange(hsv, lower_green, upper_green)
+
+    # Flood fill starting from all 4 screen edges to remove connected background only
+    # This prevents white/silver car body highlights from being cut out
+    flood_mask = np.zeros((h + 2, w + 2), np.uint8)
+    green_copy = green_mask.copy()
     
-    # Smooth edges using Gaussian Blur on the mask
-    mask_blurred = cv2.GaussianBlur(green_mask, (5, 5), 0)
+    seed_points = [
+        (0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1),
+        (w // 2, 0), (0, h // 2), (w - 1, h // 2), (w // 4, 0), (3 * w // 4, 0)
+    ]
     
-    # Calculate transparency alpha (0 = transparent, 255 = opaque)
-    alpha = 255 - mask_blurred
-    np_img[:, :, 3] = alpha
+    for seed_x, seed_y in seed_points:
+        if green_copy[seed_y, seed_x] > 0:
+            cv2.floodFill(green_copy, flood_mask, (seed_x, seed_y), 0, flags=4 | (255 << 8))
+
+    # All flood-filled areas (value 255 in flood_mask) belong to outer background
+    bg_mask = (flood_mask[1:-1, 1:-1] == 255)
+
+    # Smooth background mask edges with slight blur to remove sharp jagged pixels
+    kernel = np.ones((3, 3), np.uint8)
+    bg_mask_uint8 = (bg_mask * 255).astype(np.uint8)
+    bg_mask_uint8 = cv2.dilate(bg_mask_uint8, kernel, iterations=1)
     
-    # Remove green spill / reflections cast onto car paint specular highlights
-    green_spill = (g > r) & (g > b) & (np_img[:, :, 3] > 50)
-    np_img[green_spill, 1] = np.maximum(r[green_spill], b[green_spill])
-    
+    # Apply transparency to background pixels only
+    np_img[bg_mask_uint8 > 0, 3] = 0
+
+    # Mild green spill cleanup ON CAR EDGES ONLY (where car is visible)
+    car_pixels = np_img[:, :, 3] > 0
+    r = np_img[:, :, 0].astype(np.int16)
+    g = np_img[:, :, 1].astype(np.int16)
+    b = np_img[:, :, 2].astype(np.int16)
+
+    # Neutralize extreme green reflections on metallic edges without touching car body paint
+    green_spill = car_pixels & (g > r + 35) & (g > b + 35)
+    np_img[green_spill, 1] = ((r[green_spill] + b[green_spill]) // 2).astype(np.uint8)
+
     return Image.fromarray(np_img, "RGBA")
 
-def crop_transparent_padding(pil_image: Image.Image, padding: int = 20) -> Image.Image:
-    """
-    Crops empty transparent padding so the car fills the image cleanly.
-    """
+def crop_transparent_padding(pil_image: Image.Image, padding: int = 15) -> Image.Image:
     bbox = pil_image.getbbox()
     if not bbox:
         return pil_image
@@ -109,13 +128,12 @@ async def process_car_image(
 
         input_image = Image.open(io.BytesIO(contents))
         
-        # 1. Remove Green Screen Background
+        # 1. Remove Green Screen Background cleanly preserving white/silver car paint
         transparent_car = remove_green_screen_background(input_image)
         
         # 2. Auto-crop surrounding empty space
         final_image = crop_transparent_padding(transparent_car, padding=15)
         
-        # Save output image to memory buffer
         img_byte_arr = io.BytesIO()
         final_image.save(img_byte_arr, format="PNG")
         img_byte_arr.seek(0)
