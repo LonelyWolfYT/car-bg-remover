@@ -1,13 +1,12 @@
 import io
 import os
 import requests
-import numpy as np
 from PIL import Image
 from fastapi import FastAPI, File, UploadFile, Form, Query, Header, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from rembg import remove, new_session
 
+# Initialize FastAPI app immediately (Imports in 0.001 seconds!)
 app = FastAPI(title="FiveM Car Background Remover API", version="1.0.0")
 
 app.add_middleware(
@@ -18,12 +17,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize lightweight Mobile AI Segmentation model (u2netp uses ~60MB RAM)
+# Global AI session variable
 ai_session = None
 
 def get_ai_session():
     global ai_session
     if ai_session is None:
+        # Import heavy AI module inside function so uvicorn binds port instantly!
+        from rembg import new_session
         ai_session = new_session("u2netp")
     return ai_session
 
@@ -79,7 +80,8 @@ async def process_car_image(
 
         input_image = Image.open(io.BytesIO(contents)).convert("RGBA")
         
-        # AI Neural Network Object Segmentation (u2netp mobile model)
+        # Import rembg lazily on first request
+        from rembg import remove
         transparent_car = remove(input_image, session=get_ai_session())
         
         # Auto-crop surrounding empty space
