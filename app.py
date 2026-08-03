@@ -4,7 +4,7 @@ import requests
 import numpy as np
 from PIL import Image
 import cv2
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException
+from fastapi import FastAPI, File, UploadFile, Form, Query, Header, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -85,10 +85,20 @@ async def process_car_image(
     file: UploadFile = File(None),
     files: UploadFile = File(None),
     webhook: str = Form(None),
-    model: str = Form("Vehicle"),
-    player: str = Form("Player")
+    model: str = Form(None),
+    player: str = Form(None),
+    q_webhook: str = Query(None, alias="webhook"),
+    q_model: str = Query(None, alias="model"),
+    q_player: str = Query(None, alias="player"),
+    x_discord_webhook: str = Header(None),
+    x_car_model: str = Header(None),
+    x_player_name: str = Header(None)
 ):
     try:
+        target_webhook = x_discord_webhook or q_webhook or webhook or os.getenv("DISCORD_WEBHOOK_URL")
+        target_model = x_car_model or q_model or model or "Vehicle"
+        target_player = x_player_name or q_player or player or "Player"
+
         upload_file = file or files
         if not upload_file:
             raise HTTPException(status_code=400, detail="No screenshot image uploaded")
@@ -111,17 +121,16 @@ async def process_car_image(
         img_byte_arr.seek(0)
         
         # 3. Upload transparent PNG to Discord Webhook
-        target_webhook = webhook or os.getenv("DISCORD_WEBHOOK_URL")
         webhook_status = False
         
         if target_webhook and target_webhook.startswith("http"):
-            filename = f"{model.upper()}_transparent.png"
+            filename = f"{target_model.upper()}_transparent.png"
             
             payload = {
                 "embeds": [
                     {
-                        "title": f"🚗 Vehicle Image: {model.upper()}",
-                        "description": f"Transparent PNG image created for **{model}**.\nRequested by player: `{player}`",
+                        "title": f"🚗 Vehicle Image: {target_model.upper()}",
+                        "description": f"Transparent PNG image created for **{target_model}**.\nRequested by player: `{target_player}`",
                         "color": 3447003,
                         "image": {"url": f"attachment://{filename}"},
                         "footer": {"text": "FiveM Car BG Remover | Antigravity"}
@@ -142,7 +151,7 @@ async def process_car_image(
 
         return JSONResponse(content={
             "success": True,
-            "model": model,
+            "model": target_model,
             "webhook_sent": webhook_status,
             "message": "Car transparent PNG created and uploaded to Discord!"
         })
