@@ -11,9 +11,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Pre-download u2netp (lightweight 4MB mobile AI model) during build
+RUN python -c "from rembg import new_session; new_session('u2netp')"
+
 COPY app.py .
 
-ENV PORT 10000
 EXPOSE 10000
 
-CMD uvicorn app:app --host 0.0.0.0 --port $PORT
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "10000"]
