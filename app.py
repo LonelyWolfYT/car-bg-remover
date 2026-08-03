@@ -19,8 +19,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize rembg session
-rembg_session = new_session("u2net")
+# Lazy initialize rembg session to allow instant server startup & port binding
+rembg_session = None
+
+def get_rembg_session():
+    global rembg_session
+    if rembg_session is None:
+        rembg_session = new_session("u2net")
+    return rembg_session
 
 def clean_green_chroma_and_spill(pil_image: Image.Image) -> Image.Image:
     """
@@ -70,6 +76,10 @@ def crop_transparent_padding(pil_image: Image.Image, padding: int = 20) -> Image
 def read_root():
     return {"status": "online", "service": "FiveM Car Background Remover API"}
 
+@app.get("/healthz")
+def health_check():
+    return {"status": "healthy"}
+
 @app.post("/process-car")
 async def process_car_image(
     file: UploadFile = File(None),
@@ -91,7 +101,7 @@ async def process_car_image(
         input_image = Image.open(io.BytesIO(contents)).convert("RGBA")
         
         # 1. AI Background Removal using rembg
-        removed_bg = remove(input_image, session=rembg_session)
+        removed_bg = remove(input_image, session=get_rembg_session())
         
         # 2. Secondary Green Chroma & Spill Cleaning
         cleaned_image = clean_green_chroma_and_spill(removed_bg)
