@@ -16,6 +16,7 @@ RUN python -c "from rembg import new_session; new_session('u2net')"
 
 COPY app.py .
 
+ENV PORT=5000
 EXPOSE 5000
 
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "5000"]
+CMD ["sh", "-c", "uvicorn app:app --host 0.0.0.0 --port ${PORT:-5000}"]
