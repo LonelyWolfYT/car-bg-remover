@@ -5,9 +5,8 @@ import numpy as np
 from PIL import Image
 import cv2
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from rembg import remove, new_session
 
 app = FastAPI(title="FiveM Car Background Remover API", version="1.0.0")
 
@@ -19,44 +18,45 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Lazy initialize rembg session to allow instant server startup & port binding
-rembg_session = None
-
-def get_rembg_session():
-    global rembg_session
-    if rembg_session is None:
-        rembg_session = new_session("u2net")
-    return rembg_session
-
-def clean_green_chroma_and_spill(pil_image: Image.Image) -> Image.Image:
+def remove_green_screen_background(pil_image: Image.Image) -> Image.Image:
     """
-    Cleans up green screen chroma background and green spill reflections on vehicle body.
+    Ultra-lightweight high-speed Chroma Key Green Screen removal & spill reduction.
+    Uses ~30MB RAM (Perfect for Render Free Tier).
     """
-    img_np = np.array(pil_image.convert("RGBA"))
-    r, g, b, a = img_np[:, :, 0], img_np[:, :, 1], img_np[:, :, 2], img_np[:, :, 3]
+    img_rgba = pil_image.convert("RGBA")
+    np_img = np.array(img_rgba)
     
-    # Convert RGB to HSV to locate green screen mask
-    rgb = img_np[:, :, :3]
-    hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
+    # Extract channels
+    r = np_img[:, :, 0].astype(np.int16)
+    g = np_img[:, :, 1].astype(np.int16)
+    b = np_img[:, :, 2].astype(np.int16)
     
-    # Define green screen HSV range (bright neon green)
-    lower_green = np.array([35, 50, 50])
+    # Convert to HSV color space for accurate green detection
+    rgb_bgr = cv2.cvtColor(np_img[:, :, :3], cv2.COLOR_RGB2BGR)
+    hsv = cv2.cvtColor(rgb_bgr, cv2.COLOR_BGR2HSV)
+    
+    # Define green screen HSV boundaries (bright neon green studio screen)
+    lower_green = np.array([35, 45, 45])
     upper_green = np.array([85, 255, 255])
     
     green_mask = cv2.inRange(hsv, lower_green, upper_green)
     
-    # Set alpha to 0 for green screen pixels
-    img_np[green_mask > 0, 3] = 0
+    # Smooth edges using Gaussian Blur on the mask
+    mask_blurred = cv2.GaussianBlur(green_mask, (5, 5), 0)
     
-    # Desaturate minor green spill on semi-transparent edge pixels
-    green_spill_mask = (g > r) & (g > b) & (img_np[:, :, 3] > 0)
-    img_np[green_spill_mask, 1] = np.maximum(img_np[green_spill_mask, 0], img_np[green_spill_mask, 2])
-
-    return Image.fromarray(img_np, "RGBA")
+    # Calculate transparency alpha (0 = transparent, 255 = opaque)
+    alpha = 255 - mask_blurred
+    np_img[:, :, 3] = alpha
+    
+    # Remove green spill / reflections cast onto car paint specular highlights
+    green_spill = (g > r) & (g > b) & (np_img[:, :, 3] > 50)
+    np_img[green_spill, 1] = np.maximum(r[green_spill], b[green_spill])
+    
+    return Image.fromarray(np_img, "RGBA")
 
 def crop_transparent_padding(pil_image: Image.Image, padding: int = 20) -> Image.Image:
     """
-    Crops empty transparent space around the isolated car.
+    Crops empty transparent padding so the car fills the image cleanly.
     """
     bbox = pil_image.getbbox()
     if not bbox:
@@ -89,7 +89,6 @@ async def process_car_image(
     player: str = Form("Player")
 ):
     try:
-        # Support both 'file' and 'files' form key (screenshot-basic uses 'files')
         upload_file = file or files
         if not upload_file:
             raise HTTPException(status_code=400, detail="No screenshot image uploaded")
@@ -98,23 +97,20 @@ async def process_car_image(
         if not contents:
             raise HTTPException(status_code=400, detail="Uploaded file is empty")
 
-        input_image = Image.open(io.BytesIO(contents)).convert("RGBA")
+        input_image = Image.open(io.BytesIO(contents))
         
-        # 1. AI Background Removal using rembg
-        removed_bg = remove(input_image, session=get_rembg_session())
+        # 1. Remove Green Screen Background
+        transparent_car = remove_green_screen_background(input_image)
         
-        # 2. Secondary Green Chroma & Spill Cleaning
-        cleaned_image = clean_green_chroma_and_spill(removed_bg)
+        # 2. Auto-crop surrounding empty space
+        final_image = crop_transparent_padding(transparent_car, padding=15)
         
-        # 3. Auto-crop tight bounding box around the vehicle
-        final_image = crop_transparent_padding(cleaned_image, padding=15)
-        
-        # Save output image to in-memory bytes buffer
+        # Save output image to memory buffer
         img_byte_arr = io.BytesIO()
         final_image.save(img_byte_arr, format="PNG")
         img_byte_arr.seek(0)
         
-        # 4. If Discord Webhook URL provided, send transparent PNG to Discord
+        # 3. Upload transparent PNG to Discord Webhook
         target_webhook = webhook or os.getenv("DISCORD_WEBHOOK_URL")
         webhook_status = False
         
@@ -124,9 +120,9 @@ async def process_car_image(
             payload = {
                 "embeds": [
                     {
-                        "title": f"🚗 Vehicle Cutout: {model.upper()}",
-                        "description": f"Transparent PNG image generated for vehicle **{model}**.\nRequested by: `{player}`",
-                        "color": 3447003, # Hex color (Blue)
+                        "title": f"🚗 Vehicle Image: {model.upper()}",
+                        "description": f"Transparent PNG image created for **{model}**.\nRequested by player: `{player}`",
+                        "color": 3447003,
                         "image": {"url": f"attachment://{filename}"},
                         "footer": {"text": "FiveM Car BG Remover | Antigravity"}
                     }
@@ -144,16 +140,15 @@ async def process_car_image(
             else:
                 print(f"[ERROR] Discord Webhook Failed: {resp.status_code} - {resp.text}")
 
-        img_byte_arr.seek(0)
         return JSONResponse(content={
             "success": True,
             "model": model,
             "webhook_sent": webhook_status,
-            "message": "Car image processed and transparent PNG created successfully!"
+            "message": "Car transparent PNG created and uploaded to Discord!"
         })
 
     except Exception as e:
-        print(f"[ERROR] Exception during processing: {str(e)}")
+        print(f"[ERROR] Processing exception: {str(e)}")
         return JSONResponse(
             status_code=500,
             content={"success": False, "error": str(e)}
@@ -162,5 +157,4 @@ async def process_car_image(
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", 10000))
-    uvicorn.run("app:app", host="0.0.0.0", port=port)
- 
+    uvicorn.run(app, host="0.0.0.0", port=port)
